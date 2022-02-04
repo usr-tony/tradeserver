@@ -33,11 +33,8 @@ async def app(sock, *args):
         'positions': {}
     }
     #look at connections and determine if live account should be used
-    if len(active_cons) == 1:
-        live = True
-    else:
-        live = False
-        
+    live = True if len(active_cons) == 1 else False
+    live = False
     if live:
         await live_trading(stats, wallet, exinfo, sock, client)
     else:
@@ -158,21 +155,20 @@ def parse_userdata(msg, wallet, stats):
         # update wallet balance
         wallet['cash'] = wallet_balance
 
-    print(wallet, stats)
     return wallet, stats
 
 def manage_positions(wallet, symbol, quantity, side, average_price):
     symbol = symbol.lower()
-    if side == 'BUY':
-        trade_quantity = quantity
+    trade_quantity = quantity if side == 'BUY' else -quantity
+    if not wallet['positions'].get(symbol):
+        wallet['positions'][symbol] = {'qty': trade_quantity, 'avgprice': average_price}
+
     else:
-        trade_quantity = -quantity
-    
-    if symbol not in wallet['positions']:
-        wallet['positions'][symbol] = {'qty': trade_quantity}
-    else:
+        qty = wallet['positions'][symbol]['qty']
         wallet['positions'][symbol]['qty'] += trade_quantity
-        wallet['positions'][symbol]['avgprice'] = average_price
+        if abs(qty + trade_quantity) > abs(qty): # if position not reducing
+            wallet['positions'][symbol]['avgprice'] = average_price
+            
         if wallet['positions'][symbol]['qty'] == 0:
             del wallet['positions'][symbol]
 
@@ -220,13 +216,12 @@ def sim_trade(wallet, stats, symbol, side, qty, lastprice, client, trade_size, m
 
     fee_mod = 0.0004
     # check if position is reducing
-    # check if position already in wallet
-    reducing = wallet['positions'].get(symbol) != None
     # checks if current position is of opposing side as trade quantity
-    if reducing:
-        cri1 = wallet['positions'][symbol]['qty'] > 0 and trade_quantity < 0
-        cri2 = wallet['positions'][symbol]['qty'] < 0 and trade_quantity > 0
-        reducing = cri1 or cri2
+    try:
+        curr_qty = wallet['positions'][symbol]['qty']
+        reducing = abs(curr_qty + trade_quantity) < abs(curr_qty)
+    except:
+        reducing = False
 
     if reducing:
         avgprice = float(wallet['positions'][symbol]['avgprice'])
@@ -239,9 +234,12 @@ def sim_trade(wallet, stats, symbol, side, qty, lastprice, client, trade_size, m
         fees = abs(trade_quantity) * lastprice * fee_mod
         stats['gp'] += gp
         wallet['cash'] += abs(trade_quantity * lastprice) -  fees
-
         if side == 'BUY': # necessary as the absolute values of trade quantity reverses the gp of a short
             wallet['cash'] += gp * 2
+
+        # delete position is qty is 0
+        if wallet['positions'][symbol]['qty'] == 0:
+            del wallet['positions'][symbol]
 
     elif wallet['cash'] < abs(minqty * lastprice):
         return 'insufficient margin'
@@ -276,24 +274,20 @@ def sim_trade(wallet, stats, symbol, side, qty, lastprice, client, trade_size, m
     stats['fees'] += fees
     stats['np'] = stats['gp'] - stats['fees']
 
-    # delete positions with 0 qty
-    positions = [sym for sym in wallet['positions']]
-    for sym in positions:
-        if wallet['positions'][sym]['qty'] == 0:
-            del wallet['positions'][sym]
-
     return 0
 
 
     
-# below is to start the websocket server
+# below starts the websocket server
 def gen_ssl():
     os.system('openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -sha256 -days 365')
     #requires some user input here
+    #change client side endpoint ip addr
+    #make an initial https request with the browser
 
 def get_ssl_context():
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain('./cert.pem', './key.pem')
+    context.load_cert_chain('./certificate.crt', './private.key')
     return context
 
 async def start_server():

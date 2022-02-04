@@ -2,3 +2,5 @@
 *.key
 *pycache*
 *.pem
+*.key
+*.crt
