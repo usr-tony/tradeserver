@@ -1,22 +1,14 @@
-from exchange_info import get_exchange_info
 from binance import AsyncClient, BinanceSocketManager
 import asyncio
-import os
 import websockets
 import json
-import orders
+from _binance import create_client, create_order, close_all
 from threading import Thread
 from random import randint
 import math
 import ssl
 
 active_cons = []
-
-async def create_client():
-    client = await AsyncClient.create(api_key=os.environ.get('apikey'), api_secret=os.environ.get('secretkey'))
-    exinfo = await get_exchange_info(client)
-    print('new client')
-    return client, exinfo
 
 async def app(sock, *args):
     active_cons.append(sock)
@@ -34,7 +26,6 @@ async def app(sock, *args):
     }
     #look at connections and determine if live account should be used
     live = True if len(active_cons) == 1 else False
-    live = False
     if live:
         await live_trading(stats, wallet, exinfo, sock, client)
     else:
@@ -53,6 +44,7 @@ async def live_trading(stats, wallet, exinfo, sock, client):
         async def recv():
             return await recv_client(client, sock)
 
+        await send('live')
         while True:
             try:
                 msg = await recv()
@@ -76,7 +68,7 @@ async def live_trading(stats, wallet, exinfo, sock, client):
                 value = minqty * lastprice
                 qty = math.ceil(5 / value) * minqty
             # send order
-            res = await orders.create_order(client, sym=sym, side=side, qty=qty)
+            res = await create_order(client, sym=sym, side=side, qty=qty)
             # receive a few messages if available
             status_message = 'start'
             while True:
@@ -92,6 +84,7 @@ async def live_trading(stats, wallet, exinfo, sock, client):
             #send message to client
             await send(json.dumps(message))
 
+
 async def send_client(client=None, sock=None, msg=None):
     try:
         return await sock.send(msg)
@@ -100,8 +93,10 @@ async def send_client(client=None, sock=None, msg=None):
         print('connection terminated', len(active_cons))
         await sock.close()
         if client != None:
+            await close_all(client)
             await client.close_connection()
         raise Exception
+
 
 async def recv_client(client=None, sock=None):
     try:
@@ -111,6 +106,7 @@ async def recv_client(client=None, sock=None):
         print('connection terminated', len(active_cons))
         await sock.close()
         if client != None:
+            await close_all(client)
             await client.close_connection()
         raise Exception
 
@@ -177,13 +173,16 @@ async def simulated_trading(stats, wallet, exinfo, sock, client):
     async def send(msg):
         await send_client(client, sock, msg)
 
-    # determine trade quantities for various assets
-     
+    # send to client that trades will be simulated
+    await send('simulated')
     # load wallet with initial cash
     wallet['cash'] = 100000
     trade_size = 10000
     while True:
-        msg = await recv_client(client, sock)
+        try:
+            msg = await recv_client(client, sock)
+        except:
+            break
         order = json.loads(msg)
         sym = order['symbol'].upper()
         side = order['side'].upper()
@@ -201,11 +200,7 @@ async def simulated_trading(stats, wallet, exinfo, sock, client):
             qty = math.ceil(trade_size / value) * minqty
         # create simulated trade
         error = sim_trade(wallet, stats, sym, side, qty, lastprice, client, trade_size, minqty)
-        if error:
-            message = error
-        else:
-            message = json.dumps({'wallet': wallet, 'stats': stats})
-        
+        message = error if error else json.dumps({'wallet': wallet, 'stats': stats})
         await send(message)
 
 def sim_trade(wallet, stats, symbol, side, qty, lastprice, client, trade_size, minqty, hx=[]):
