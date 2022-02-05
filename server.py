@@ -1,12 +1,10 @@
-from binance import AsyncClient, BinanceSocketManager
 import asyncio
 import websockets
 import json
 from _binance import create_client, create_order, close_all
-from threading import Thread
-from random import randint
 import math
 import ssl
+from binance import BinanceSocketManager
 
 active_cons = []
 
@@ -88,27 +86,25 @@ async def live_trading(stats, wallet, exinfo, sock, client):
 async def send_client(client=None, sock=None, msg=None):
     try:
         return await sock.send(msg)
-    except Exception:
-        active_cons.remove(sock)
-        print('connection terminated', len(active_cons))
-        await sock.close()
-        if client != None:
-            await close_all(client)
-            await client.close_connection()
-        raise Exception
+    except Exception as e:
+         await handle_dc(client, sock, e)
 
 
 async def recv_client(client=None, sock=None):
     try:
         return await sock.recv()
-    except Exception:
-        active_cons.remove(sock)
-        print('connection terminated', len(active_cons))
-        await sock.close()
-        if client != None:
-            await close_all(client)
-            await client.close_connection()
-        raise Exception
+    except Exception as e:
+        await handle_dc(client, sock, e)
+
+
+async def handle_dc(client, sock, e):
+    if client != None:
+        res = await close_all(client)
+
+    active_cons.remove(sock)
+    print('connection terminated', len(active_cons))
+    await sock.close()
+    raise e
 
 
 def parse_userdata(msg, wallet, stats):
@@ -203,7 +199,7 @@ async def simulated_trading(stats, wallet, exinfo, sock, client):
         message = error if error else json.dumps({'wallet': wallet, 'stats': stats})
         await send(message)
 
-def sim_trade(wallet, stats, symbol, side, qty, lastprice, client, trade_size, minqty, hx=[]):
+def sim_trade(wallet, stats, symbol, side, qty, lastprice, client, trade_size, minqty):
     if side == 'BUY':
         trade_quantity = qty
     else:

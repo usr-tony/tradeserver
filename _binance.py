@@ -1,5 +1,5 @@
 import os
-from binance import AsyncClient, BinanceSocketManager
+from binance import AsyncClient
 import asyncio
 from time import sleep
 
@@ -40,9 +40,10 @@ async def close_all(client):
     for position in res['positions']:
         if float(position['positionAmt']) != 0:
             if round(float(position['notional']) / 5) != 0:
-                side = 'BUY' if float(position['positionAmt'] > 0) else 'SELL'
-                res = await create_order(client, position['symbol'], side, qty=float(position['positionAmt']), reduce_only='True')
-            
+                side = 'BUY' if float(position['positionAmt']) < 0 else 'SELL'
+                res = await create_order(client, position['symbol'], side, qty=abs(float(position['positionAmt'])), reduce_only='True')
+
+    await client.close_connection()  
     return 0
 
 
