@@ -49,7 +49,17 @@ async def live_trading(stats, wallet, exinfo, sock, client):
             except:
                 break
             # process message
-            order = json.loads(msg)
+            try:
+                order = json.loads(msg)
+            except:
+                if msg == 'auto':
+                    print('auto trades initiated')
+                    continue
+                else:
+                    await client.close_connection()
+                    await sock.close()
+                    break
+
             sym = order['symbol'].upper()
             minqty = float(exinfo[sym]['minQty'])
             tick_size = float(exinfo[sym]['tickSize'])
