@@ -33,66 +33,56 @@ async def app(sock, *args):
     
 # starts live trading if there is only 1 client
 async def live_trading(stats, wallet, exinfo, sock, client):
+    i = 0
     #create socket to binance servers
     bm = BinanceSocketManager(client)
     binance_socket = bm.futures_user_socket()
     #assuming trading is live
     async with binance_socket:
-        async def send(msg):
-            return await send_client(client, sock, msg)
-
-        async def recv():
-            return await recv_client(client, sock)
-
-        await send('live')
+        await send(client, sock, 'live')
         while True:
-            try:
-                msg = await recv()
-                print('main loop message received')
-            except:
-                break
+            msg = await recv(client, sock)
             # process message
-            try:
-                order = json.loads(msg)
-            except:
-                if msg == 'auto':
-                    await auto_manager(client, sock, exinfo, wallet, stats)
-
-                continue
-
-            sym = order['symbol'].upper()
-            minqty = float(exinfo[sym]['minQty'])
-            tick_size = float(exinfo[sym]['tickSize'])
-            side = order['side'].upper()
-            # makes sure last price is not undefined
-            if order.get('lastprice') == None:
-                await send('not yet')
-                continue
-            lastprice = float(order['lastprice'])
-            #define qty to be minqty if notional value is greater than 5
-            if minqty * lastprice > 5:
-                qty = minqty
+            if msg == 'auto':
+                pass
+            elif not msg:
+                pass
             else:
-                value = minqty * lastprice
-                qty = math.ceil(5 / value) * minqty
-            # send order
-            print('main loop before sending order')
-            res = await create_order(client, sym=sym, side=side, qty=qty)
-            # receive a few messages if available
-            status_message = 'start'
+                order = json.loads(msg)
+                sym = order['symbol'].upper()
+                minqty = float(exinfo[sym]['minQty'])
+                tick_size = float(exinfo[sym]['tickSize'])
+                side = order['side'].upper()
+                # makes sure last price is not undefined
+                if order.get('lastprice') == None:
+                    await send(client, sock, 'not yet')
+                    continue
+                lastprice = float(order['lastprice'])
+                #define qty to be minqty if notional value is greater than 5
+                if minqty * lastprice > 5:
+                    qty = minqty
+                else:
+                    value = minqty * lastprice
+                    qty = math.ceil(5 / value) * minqty
+                # send order
+                res = await create_order(client, sym=sym, side=side, qty=qty)
+            
+            message_received = False
             while True:
                 #receive response from binance server
                 try:
-                    userdata = await asyncio.wait_for(binance_socket.recv(), timeout=0.1)
+                    userdata = await asyncio.wait_for(binance_socket.recv(), timeout=0.001)
+                    message_received = True
                 except:
                     break
                 # parse message and calculate p&l if appropriate
-                wallet, stats = parse_userdata(userdata, wallet, stats)
+                if message_received:
+                    wallet, stats = parse_userdata(userdata, wallet, stats)
             
-            message = {'wallet': wallet, 'stats': stats}
-            #send message to client
-            print('main loop before sending message')
-            await send(json.dumps(message))
+            if message_received:
+                message = {'wallet': wallet, 'stats': stats}
+                #send message to client
+                await send(client, sock, json.dumps(message))
 
 
 async def auto_manager(client, sock, exinfo, wallet, stats):
@@ -128,7 +118,7 @@ async def binance_msg_loop(client, sock, wallet, stats, e):
         msg_received = False
         while True:
             try:
-                userdata = await asyncio.wait_for(binance_socket.recv(), timeout=0.3)
+                userdata = await asyncio.wait_for(binance_socket.recv(), timeout=0.01)
                 msg_received = True
             except:
                 if msg_received:
@@ -158,14 +148,23 @@ async def recv_from_client(client, sock, e):
             e.set()
             return
 
-async def send_client(client=None, sock=None, msg=None):
+async def send(client=None, sock=None, msg=None):
     try:
         return await sock.send(msg)
     except Exception as e:
          await handle_dc(client, sock, e)
 
 
-async def recv_client(client=None, sock=None):
+async def recv(client=None, sock=None):
+    try:
+        return await asyncio.wait_for(sock.recv(), timeout=0.001)
+    except asyncio.TimeoutError:
+        return None
+    except Exception as e:
+        await handle_dc(client, sock, e)
+
+
+async def recv_simulated(client=None, sock=None):
     try:
         return await sock.recv()
     except Exception as e:
@@ -241,24 +240,18 @@ def manage_positions(wallet, symbol, quantity, side, average_price):
 
 ### simulated trading section ###
 async def simulated_trading(stats, wallet, exinfo, sock, client):
-    async def send(msg):
-        await send_client(client, sock, msg)
-
     # send to client that trades will be simulated
-    await send('simulated')
+    await send(client, sock, 'simulated')
     # load wallet with initial cash
     wallet['cash'] = 100000
     trade_size = 10000
     while True:
-        try:
-            msg = await recv_client(client, sock)
-        except:
-            break
+        msg = recv_simulated(client, sock)
         order = json.loads(msg)
         sym = order['symbol'].upper()
         side = order['side'].upper()
         if order.get('lastprice') == None:
-            await send('not yet')
+            await send(client, sock, 'not yet')
             continue
         
         lastprice = float(order['lastprice'])
@@ -272,7 +265,7 @@ async def simulated_trading(stats, wallet, exinfo, sock, client):
         # create simulated trade
         error = sim_trade(wallet, stats, sym, side, qty, lastprice, client, trade_size, minqty)
         message = error if error else json.dumps({'wallet': wallet, 'stats': stats})
-        await send(message)
+        await send(client, sock, message)
 
 def sim_trade(wallet, stats, symbol, side, qty, lastprice, client, trade_size, minqty):
     if side == 'BUY':
