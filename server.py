@@ -5,6 +5,8 @@ from _binance import create_client, create_order, close_all
 import math
 import ssl
 from binance import BinanceSocketManager
+import autotrader
+from threading import Thread, Event
 
 active_cons = []
 
@@ -46,6 +48,7 @@ async def live_trading(stats, wallet, exinfo, sock, client):
         while True:
             try:
                 msg = await recv()
+                print('main loop message received')
             except:
                 break
             # process message
@@ -53,12 +56,9 @@ async def live_trading(stats, wallet, exinfo, sock, client):
                 order = json.loads(msg)
             except:
                 if msg == 'auto':
-                    print('auto trades initiated')
-                    continue
-                else:
-                    await client.close_connection()
-                    await sock.close()
-                    break
+                    await auto_manager(client, sock, exinfo, wallet, stats)
+
+                continue
 
             sym = order['symbol'].upper()
             minqty = float(exinfo[sym]['minQty'])
@@ -76,6 +76,7 @@ async def live_trading(stats, wallet, exinfo, sock, client):
                 value = minqty * lastprice
                 qty = math.ceil(5 / value) * minqty
             # send order
+            print('main loop before sending order')
             res = await create_order(client, sym=sym, side=side, qty=qty)
             # receive a few messages if available
             status_message = 'start'
@@ -90,8 +91,72 @@ async def live_trading(stats, wallet, exinfo, sock, client):
             
             message = {'wallet': wallet, 'stats': stats}
             #send message to client
+            print('main loop before sending message')
             await send(json.dumps(message))
 
+
+async def auto_manager(client, sock, exinfo, wallet, stats):
+    e = Event()
+    e.clear()
+    #t1 = Thread(target=start_autotrader, args=(client, exinfo, e))
+    #t2 = Thread(target=client_auto, args=(client, sock, wallet, stats, e))
+    t3 = Thread(target=asyncio.run, args=(recv_from_client(client, sock, e),))
+    #t1.start()
+    #t2.start()
+    t3.start()
+    print('all threads started')
+    #t1.join()
+    #t2.join()
+    t3.join()
+    if e.is_set():
+        print('auto manager closed')
+        return
+    else:
+        print('auto maanger closed, but event is false')
+
+def start_autotrader(client, exinfo, e):
+    t = Thread(target=autotrader.calc_indices, args=(e,))
+    t.start()
+    asyncio.run(autotrader.start_soc(client, exinfo, e))
+
+def client_auto(*args):
+    asyncio.run(binance_msg_loop(*args))
+
+
+async def binance_msg_loop(client, sock, wallet, stats, e):
+    while True:
+        msg_received = False
+        while True:
+            try:
+                userdata = await asyncio.wait_for(binance_socket.recv(), timeout=0.3)
+                msg_received = True
+            except:
+                if msg_received:
+                    break
+                elif e.is_set():
+                    return
+                    
+            # parse message and calculate p&l if appropriate
+            if msg_received:
+                wallet, stats = parse_userdata(userdata, wallet, stats)
+        
+        message = {'wallet': wallet, 'stats': stats}
+        #send message to client
+        await send_client(sock=sock, msg=json.dumps(message))
+
+
+async def recv_from_client(client, sock, e):
+    while True:
+        try:
+            msg = await recv_client(client, sock)
+        except Exception as err:
+            raise err
+            return
+
+        print('function recv_from_client:', msg)
+        if msg == 'stop auto':
+            e.set()
+            return
 
 async def send_client(client=None, sock=None, msg=None):
     try:
