@@ -13,34 +13,24 @@ symbols = [
     'ETHUSDT',
     'BCHUSDT',
     'LTCUSDT',
-    'AXSUSDT',
+    'XRPUSDT',
     'DOGEUSDT',
 ]
-
-position = {'status': 0, 'symbol': '', 'qty': 0} # keeps track of current position; status 1 = long, -1 = short, 0 = no position;
-tables = dict()  # table containing parsed websocket trade data
-sym_index = dict() # moving averages of individual tickers
-
-for s in symbols:
-    tables[s] = {
-        'T': [],
-        'b': [],
-        'a': []
-    }
-    sym_index[s] = []
 
 async def main():
     client = await AsyncClient.create(api_key=os.environ.get('apikey'), api_secret=os.environ.get('secretkey'))
     exinfo = await _binance.get_exchange_info(client)
-    t = threading.Thread(target=calc_indices, args=(None,))
-    t.start()
-    await start_soc(exinfo, None)
+    await start(exinfo, None, client)
 
 
-async def start_soc(ex_info, e):
-    client = await AsyncClient.create(api_key=os.environ.get('apikey'), api_secret=os.environ.get('secretkey'))
+async def start(ex_info, e, client=None):
+    if not client:
+        client = await AsyncClient.create(api_key=os.environ.get('apikey'), api_secret=os.environ.get('secretkey'))
+
     bsm = BinanceSocketManager(client)
     ts = bsm.futures_multiplex_socket([s.lower() + '@bookTicker' for s in symbols]) # starts a socket with all symbols in symbols file
+    dm = Data_manager()
+    dm_thread = dm._start(e)
     async with ts: # starts receiving messages and appends them to table
         print('auto started')
         while True:
@@ -49,16 +39,19 @@ async def start_soc(ex_info, e):
                     break
             d = await ts.recv()
             sym = d['stream'].split('@')[0].upper()     # retrieves symbol from websocket message
-            table = tables[sym]    
+            table = dm.tables[sym]    
             table['T'].append(int(d['data']['T']))     # appends the following to tables[symbol]: timestamp
             table['b'].append(float(d['data']['b']))     # closest bid
             table['a'].append(float(d['data']['a']))     # closest ask
-            await signal(sym, client, ex_info)
+            await signal(sym, client, ex_info, dm)
 
     await client.close_connection()
     return
 
-async def signal(sym, client, ex_info):
+async def signal(sym, client, ex_info, dm):
+    sym_index = dm.sym_index
+    tables = dm.tables
+    position = dm.position
     if sym_index[sym] == []:
         return
     rel_prices = []
@@ -89,17 +82,17 @@ async def signal(sym, client, ex_info):
             if position['symbol'] != 'BTCUSDT':
                 side = 'BUY' if agg_index > 1 else 'SELL'
                 price = tables[position['symbol']]['a'][-1] if side == 'BUY' else tables[position['symbol']]['b'][-1]
-                min_qty = float(ex_info[position['symbol']]['minQty'])   
+                min_qty = float(ex_info[position['symbol']]['minQty'])
                 # dictionary of symbol : {minQty: <minimum trade quantity>, tickSize: <contract tick size>}
                 qty = floor(5.0 // (min_qty * price) + 1) * min_qty
+                prec = ex_info[position['symbol']]['qtyprecision']
+                qty = round(qty, prec)
                 await create_order(client, position['symbol'], side, price, 'MARKET', qty)
                 position['qty'] = qty
                 if agg_index > 1: 
                     position['status'] = 1
                 elif agg_index < 1: 
                     position['status'] = -1
-                
-                print(price, position, 'minqty:', min_qty, 'precision:', ex_info[position['symbol']]['tickSize'])
 
 
     elif position['status'] != 0 and abs(agg_index - 1) < 0.0002:
@@ -111,87 +104,58 @@ async def signal(sym, client, ex_info):
         position['symbol'] = ''
         position['qty'] = 0
 
-def calc_indices(e):
-    time.sleep(5) # waits for websockets to initialize and collect data
-    while True:
-        for s in symbols:
-            update_index(s)
-    
-        time.sleep(0.67)
-        if e:
-            if e.is_set():
-                return
 
-def update_index(sym): # generates index and relative index values from table containing raw trade data
-    time_stamp, bid, ask = [tables[sym][c] for c in tables[sym]] # extracts columns from table as variables
-    index_values = []
-    for dt in [20000, 10000, 5000]: #  generate index values for to determine asset price (x)ms ago
-        t1 = time_stamp[-1] - dt
-        ii = bisect_left(time_stamp, t1)
-        index_values.append(ii)
+class Data_manager:
+    def __init__(s):
+        s.position = {'status': 0, 'symbol': '', 'qty': 0} # keeps track of current position; status 1 = long, -1 = short, 0 = no position;
+        s.tables = dict()  # table containing parsed websocket trade data
+        s.sym_index = dict() # moving averages of individual tickers
 
-    mid_prices = []
-    rel_mid_prices = []
-    relative_price = ((bid[index_values[0]] + ask[index_values[0]]) / 2)
-    for ii in index_values:
-        mid = (bid[ii] + ask[ii]) / 2
-        mid_prices.append(mid)
-        rel_mid_prices.append(mid / relative_price)
+        for sym in symbols:
+            s.tables[sym] = {
+                'T': [],
+                'b': [],
+                'a': []
+            }
+            s.sym_index[sym] = []
+
+
+    def _start(s, e):
+        return threading.Thread(target=s.calc_indices, args=[e]).start()
+
+
+    def calc_indices(s, e):
+        time.sleep(10) # waits for websockets to initialize and collect data
+        while True:
+            for sym in symbols:
+                s.update_index(sym)
         
-    sym_index[sym] = mid_prices
+            time.sleep(0.67)
+            if e:
+                if e.is_set():
+                    return
+
+    def update_index(s, sym): # generates index and relative index values from table containing raw trade data
+        time_stamp, bid, ask = [s.tables[sym][c] for c in s.tables[sym]] # extracts columns from table as variables
+        index_values = []
+        for dt in [20000, 10000, 5000]: #  generate index values for to determine asset price (x)ms ago
+            t1 = time_stamp[-1] - dt
+            ii = bisect_left(time_stamp, t1)
+            index_values.append(ii)
+
+        mid_prices = []
+        rel_mid_prices = []
+        relative_price = ((bid[index_values[0]] + ask[index_values[0]]) / 2)
+        for ii in index_values:
+            mid = (bid[ii] + ask[ii]) / 2
+            mid_prices.append(mid)
+            rel_mid_prices.append(mid / relative_price)
+            
+        s.sym_index[sym] = mid_prices
 
 
-async def create_order(client, sym, side, price=None, type='MARKET', qty=0.002):
-    task = asyncio.create_task(order(client, sym, side, price, type, qty))
-
-
-async def order(client, sym, side, price, type, qty):
-    trade_params = {
-        'symbol': sym,
-        'side': side,
-        'type': type,
-        'quantity': qty,
-        'price': price,
-        'reduce_only': 'False'
-    }
-    if trade_params['type'] == 'LIMIT': 
-        trade_params['timeInForce'] = 'GTC'
-
-    if trade_params['type'] == 'MARKET':
-        del trade_params['price']
-
-    res = await client.futures_create_order(**trade_params)
-    return
-
-def indices():
-    global tables
-    time.sleep(22) # waits for websockets to initialize and collect data
-    while True:
-        for s in symbols:
-            update_index(s)
-    
-        time.sleep(0.67)
-
-
-def update_index(sym): # generates index and relative index values from table containing raw trade data
-    global tables
-    global sym_index
-    time_stamp, bid, ask = [tables[sym][c] for c in tables[sym]] # extracts columns from table as variables
-    index_values = []
-    for dt in [20000, 10000, 5000]: #  generate index values for to determine asset price (x)ms ago
-        t1 = time_stamp[-1] - dt
-        ii = bisect_left(time_stamp, t1)
-        index_values.append(ii)
-
-    mid_prices = []
-    rel_mid_prices = []
-    relative_price = ((bid[index_values[0]] + ask[index_values[0]]) / 2)
-    for ii in index_values:
-        mid = (bid[ii] + ask[ii]) / 2
-        mid_prices.append(mid)
-        rel_mid_prices.append(mid / relative_price)
-        
-    sym_index[sym] = mid_prices
+async def create_order(client, sym, side, price=None, tradetype='MARKET', qty=0.002):
+    task = asyncio.create_task(_binance.order(client, sym, side, price, tradetype, qty))
 
 
 if __name__ == '__main__':

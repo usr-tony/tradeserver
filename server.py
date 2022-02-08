@@ -1,7 +1,7 @@
 import asyncio
 import websockets
 import json
-from _binance import create_client, create_order, close_all
+from _binance import create_client, create_order, close_all, get_exchange_info
 import math
 import ssl
 from binance import BinanceSocketManager
@@ -13,7 +13,8 @@ active_cons = []
 async def app(sock, *args):
     active_cons.append(sock)
     print('added active connection', len(active_cons))
-    client, exinfo =  await create_client()
+    client =  await create_client()
+    exinfo = await get_exchange_info(client)
     #initialize stats
     stats = {
         'gp': 0,
@@ -45,25 +46,34 @@ async def live_trading(stats, wallet, exinfo, sock, client):
             msg = await recv(client, sock)
         except:
             if auto_trading:
-                stop_autotrader()
+                stop_autotrader(*args)
 
             break
         # process message
-        if msg == 'auto':
-            if not auto_trading:
-                start_autotrader(client, exinfo)
-            else:
-                stop_autotrader()
-                await send(client, sock, 'stopped')
-
-            auto_trading = False if auto_trading else True
-        elif not msg:
+        if not msg:
             pass
+        elif msg in ['auto', 'stop auto']:
+            if not auto_trading and msg == 'auto':
+                await send(client, sock, 'auto trading started')
+                args = start_autotrader(client, exinfo)
+                auto_trading = True
+            elif auto_trading and msg == 'stop auto':
+                stop_autotrader(*args)
+                auto_trading = False
+                await send(client, sock, 'auto trading stopped')
+            else:
+                continue
+
         elif not auto_trading:
-            order = json.loads(msg)
+            try:
+                order = json.loads(msg)
+            except:
+                continue
+
             sym = order['symbol'].upper()
             minqty = float(exinfo[sym]['minQty'])
             tick_size = float(exinfo[sym]['tickSize'])
+            prec = int(exinfo[sym]['qtyprecision'])
             side = order['side'].upper()
             # makes sure last price is not undefined
             if order.get('lastprice') == None:
@@ -76,8 +86,9 @@ async def live_trading(stats, wallet, exinfo, sock, client):
             else:
                 value = minqty * lastprice
                 qty = math.ceil(5 / value) * minqty
+                qty = round(qty, prec)
             # send order
-            res = await create_order(client, sym=sym, side=side, qty=qty)
+            await create_order(client, sym=sym, side=side, qty=qty)
         
         # above receives message from client and takes some action 
         ##################################################################################
@@ -101,24 +112,16 @@ async def live_trading(stats, wallet, exinfo, sock, client):
 
     await binance_socket.__aexit__(None, None, None)
 
-args = []
 def start_autotrader(client, exinfo):
     e = Event()
     e.clear()
-    t = Thread(target=autotrader.calc_indices, args=(e,))
-    t.start()
-    t2 = Thread(target=asyncio.run, args=[autotrader.start_soc(exinfo, e)])
-    t2.start()
-    args = [t, t2, e]
+    t = Thread(target=asyncio.run, args=[autotrader.start(exinfo, e)])
+    t.start()    
+    return t, e
 
-def stop_autotrader():
-    if not args:
-        return 
-    
-    t, t2, e = args
+def stop_autotrader(t, e):
     e.set()
     t.join()
-    t2.join()
     print('auto trader stopped')
     return
 
@@ -134,13 +137,6 @@ async def recv(client=None, sock=None):
         return await asyncio.wait_for(sock.recv(), timeout=0.1)
     except asyncio.TimeoutError:
         return None
-    except Exception as e:
-        await handle_dc(client, sock, e)
-
-
-async def recv_simulated(client=None, sock=None):
-    try:
-        return await sock.recv()
     except Exception as e:
         await handle_dc(client, sock, e)
 
@@ -213,19 +209,32 @@ def manage_positions(wallet, symbol, quantity, side, average_price):
             del wallet['positions'][symbol]
 
 ### simulated trading section ###
+
+async def recv_simulated(client=None, sock=None):
+    try:
+        return await sock.recv()
+    except Exception as e:
+        await handle_dc(client, sock, e)
+
+
 async def simulated_trading(stats, wallet, exinfo, sock, client):
     # send to client that trades will be simulated
-    await send(client, sock, 'simulated')
+    try:
+        await client.close_connection()
+    except:
+        pass
+    
+    await send(sock=sock, msg='simulated')
     # load wallet with initial cash
     wallet['cash'] = 100000
     trade_size = 10000
     while True:
-        msg = recv_simulated(client, sock)
+        msg = await recv_simulated(sock=sock)
         order = json.loads(msg)
         sym = order['symbol'].upper()
         side = order['side'].upper()
         if order.get('lastprice') == None:
-            await send(client, sock, 'not yet')
+            await send(sock=sock, msg='not yet')
             continue
         
         lastprice = float(order['lastprice'])
@@ -239,7 +248,8 @@ async def simulated_trading(stats, wallet, exinfo, sock, client):
         # create simulated trade
         error = sim_trade(wallet, stats, sym, side, qty, lastprice, client, trade_size, minqty)
         message = error if error else json.dumps({'wallet': wallet, 'stats': stats})
-        await send(client, sock, message)
+        await send(sock=sock, msg=message)
+
 
 def sim_trade(wallet, stats, symbol, side, qty, lastprice, client, trade_size, minqty):
     if side == 'BUY':
@@ -308,16 +318,8 @@ def sim_trade(wallet, stats, symbol, side, qty, lastprice, client, trade_size, m
     stats['np'] = stats['gp'] - stats['fees']
 
     return 0
-
-
     
 # below starts the websocket server
-def gen_ssl():
-    os.system('openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -sha256 -days 365')
-    #requires some user input here
-    #change client side endpoint ip addr
-    #make an initial https request with the browser
-
 def get_ssl_context():
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain('./certificate.crt', './private.key')

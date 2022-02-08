@@ -5,9 +5,7 @@ from time import sleep
 
 async def create_client():
     client = await AsyncClient.create(api_key=os.environ.get('apikey'), api_secret=os.environ.get('secretkey'))
-    exinfo = await get_exchange_info(client)
-    print('new client')
-    return client, exinfo
+    return client
 
 async def main():
     client, _ = await create_client
@@ -20,7 +18,7 @@ async def main():
 async def create_order(client, sym, side, price=None, tradetype='MARKET', qty=0.002, reduce_only='False'):
     sym = sym.upper()
     res = await order(client, sym, side, price, tradetype, qty, reduce_only)
-    return res
+
 
 async def order(client, sym, side, price, tradetype, qty, reduce_only='False'):
     trade_params = {
@@ -31,9 +29,16 @@ async def order(client, sym, side, price, tradetype, qty, reduce_only='False'):
         'price': price,
         'reduce_only': reduce_only
     }
-    if trade_params['type'] == 'LIMIT': trade_params['timeInForce'] = 'GTC'
-    if trade_params['type'] == 'MARKET': del trade_params['price']
-    return await client.futures_create_order(**trade_params)
+    if trade_params['type'] == 'LIMIT': 
+        trade_params['timeInForce'] = 'GTC'
+
+    if trade_params['type'] == 'MARKET':
+        del trade_params['price']
+
+    try:
+        await client.futures_create_order(**trade_params)
+    except:
+        pass
 
 async def close_all(client):
     res = await client.futures_account()
@@ -55,6 +60,7 @@ async def get_exchange_info(client):
         d = ex_info[row['symbol']] = {}
         d['minQty'] = k[1]['minQty']
         d['tickSize'] = k[0]['tickSize']
+        d['qtyprecision'] = row['quantityPrecision']
     
     return ex_info
 
