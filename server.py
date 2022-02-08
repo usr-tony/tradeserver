@@ -33,120 +33,94 @@ async def app(sock, *args):
     
 # starts live trading if there is only 1 client
 async def live_trading(stats, wallet, exinfo, sock, client):
-    i = 0
     #create socket to binance servers
     bm = BinanceSocketManager(client)
     binance_socket = bm.futures_user_socket()
+    await binance_socket.__aenter__()
     #assuming trading is live
-    async with binance_socket:
-        await send(client, sock, 'live')
-        while True:
-            msg = await recv(client, sock)
-            # process message
-            if msg == 'auto':
-                pass
-            elif not msg:
-                pass
-            else:
-                order = json.loads(msg)
-                sym = order['symbol'].upper()
-                minqty = float(exinfo[sym]['minQty'])
-                tick_size = float(exinfo[sym]['tickSize'])
-                side = order['side'].upper()
-                # makes sure last price is not undefined
-                if order.get('lastprice') == None:
-                    await send(client, sock, 'not yet')
-                    continue
-                lastprice = float(order['lastprice'])
-                #define qty to be minqty if notional value is greater than 5
-                if minqty * lastprice > 5:
-                    qty = minqty
-                else:
-                    value = minqty * lastprice
-                    qty = math.ceil(5 / value) * minqty
-                # send order
-                res = await create_order(client, sym=sym, side=side, qty=qty)
-            
-            message_received = False
-            while True:
-                #receive response from binance server
-                try:
-                    userdata = await asyncio.wait_for(binance_socket.recv(), timeout=0.001)
-                    message_received = True
-                except:
-                    break
-                # parse message and calculate p&l if appropriate
-                if message_received:
-                    wallet, stats = parse_userdata(userdata, wallet, stats)
-            
-            if message_received:
-                message = {'wallet': wallet, 'stats': stats}
-                #send message to client
-                await send(client, sock, json.dumps(message))
-
-
-async def auto_manager(client, sock, exinfo, wallet, stats):
-    e = Event()
-    e.clear()
-    #t1 = Thread(target=start_autotrader, args=(client, exinfo, e))
-    #t2 = Thread(target=client_auto, args=(client, sock, wallet, stats, e))
-    t3 = Thread(target=asyncio.run, args=(recv_from_client(client, sock, e),))
-    #t1.start()
-    #t2.start()
-    t3.start()
-    print('all threads started')
-    #t1.join()
-    #t2.join()
-    t3.join()
-    if e.is_set():
-        print('auto manager closed')
-        return
-    else:
-        print('auto maanger closed, but event is false')
-
-def start_autotrader(client, exinfo, e):
-    t = Thread(target=autotrader.calc_indices, args=(e,))
-    t.start()
-    asyncio.run(autotrader.start_soc(client, exinfo, e))
-
-def client_auto(*args):
-    asyncio.run(binance_msg_loop(*args))
-
-
-async def binance_msg_loop(client, sock, wallet, stats, e):
-    while True:
-        msg_received = False
-        while True:
-            try:
-                userdata = await asyncio.wait_for(binance_socket.recv(), timeout=0.01)
-                msg_received = True
-            except:
-                if msg_received:
-                    break
-                elif e.is_set():
-                    return
-                    
-            # parse message and calculate p&l if appropriate
-            if msg_received:
-                wallet, stats = parse_userdata(userdata, wallet, stats)
-        
-        message = {'wallet': wallet, 'stats': stats}
-        #send message to client
-        await send_client(sock=sock, msg=json.dumps(message))
-
-
-async def recv_from_client(client, sock, e):
+    await send(client, sock, 'live')
+    auto_trading = False
     while True:
         try:
-            msg = await recv_client(client, sock)
-        except Exception as err:
-            raise err
-            return
+            msg = await recv(client, sock)
+        except:
+            if auto_trading:
+                stop_autotrader()
 
-        print('function recv_from_client:', msg)
-        if msg == 'stop auto':
-            e.set()
-            return
+            break
+        # process message
+        if msg == 'auto':
+            if not auto_trading:
+                start_autotrader(client, exinfo)
+            else:
+                stop_autotrader()
+                await send(client, sock, 'stopped')
+
+            auto_trading = False if auto_trading else True
+        elif not msg:
+            pass
+        elif not auto_trading:
+            order = json.loads(msg)
+            sym = order['symbol'].upper()
+            minqty = float(exinfo[sym]['minQty'])
+            tick_size = float(exinfo[sym]['tickSize'])
+            side = order['side'].upper()
+            # makes sure last price is not undefined
+            if order.get('lastprice') == None:
+                await send(client, sock, 'not yet')
+                continue
+            lastprice = float(order['lastprice'])
+            #define qty to be minqty if notional value is greater than 5
+            if minqty * lastprice > 5:
+                qty = minqty
+            else:
+                value = minqty * lastprice
+                qty = math.ceil(5 / value) * minqty
+            # send order
+            res = await create_order(client, sym=sym, side=side, qty=qty)
+        
+        # above receives message from client and takes some action 
+        ##################################################################################
+        # below gets message from binance servers and parses it then sends to client
+        userdata = None
+        while True:
+            #receive response from binance server
+            try:
+                userdata = await asyncio.wait_for(binance_socket.recv(), timeout=0.001)
+            except asyncio.TimeoutError:
+                break
+            # parse message and calculate p&l if appropriate
+            if userdata:
+                wallet, stats = parse_userdata(userdata, wallet, stats)
+        
+        if userdata:
+            message = {'wallet': wallet, 'stats': stats}
+            #send message to client
+            await send(client, sock, json.dumps(message))
+
+
+    await binance_socket.__aexit__(None, None, None)
+
+args = []
+def start_autotrader(client, exinfo):
+    e = Event()
+    e.clear()
+    t = Thread(target=autotrader.calc_indices, args=(e,))
+    t.start()
+    t2 = Thread(target=asyncio.run, args=[autotrader.start_soc(exinfo, e)])
+    t2.start()
+    args = [t, t2, e]
+
+def stop_autotrader():
+    if not args:
+        return 
+    
+    t, t2, e = args
+    e.set()
+    t.join()
+    t2.join()
+    print('auto trader stopped')
+    return
 
 async def send(client=None, sock=None, msg=None):
     try:
@@ -157,7 +131,7 @@ async def send(client=None, sock=None, msg=None):
 
 async def recv(client=None, sock=None):
     try:
-        return await asyncio.wait_for(sock.recv(), timeout=0.001)
+        return await asyncio.wait_for(sock.recv(), timeout=0.1)
     except asyncio.TimeoutError:
         return None
     except Exception as e:

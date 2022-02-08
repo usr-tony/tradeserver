@@ -11,7 +11,7 @@ from statistics import mean
 
 symbols = [
     'ETHUSDT',
-    'BTCUSDT',
+    'BCHUSDT',
     'LTCUSDT',
     'AXSUSDT',
     'DOGEUSDT',
@@ -34,10 +34,11 @@ async def main():
     exinfo = await _binance.get_exchange_info(client)
     t = threading.Thread(target=calc_indices, args=(None,))
     t.start()
-    await start_soc(client, exinfo, None)
+    await start_soc(exinfo, None)
 
 
-async def start_soc(client, ex_info, e):
+async def start_soc(ex_info, e):
+    client = await AsyncClient.create(api_key=os.environ.get('apikey'), api_secret=os.environ.get('secretkey'))
     bsm = BinanceSocketManager(client)
     ts = bsm.futures_multiplex_socket([s.lower() + '@bookTicker' for s in symbols]) # starts a socket with all symbols in symbols file
     async with ts: # starts receiving messages and appends them to table
@@ -45,7 +46,7 @@ async def start_soc(client, ex_info, e):
         while True:
             if e:
                 if e.is_set():
-                    return
+                    break
             d = await ts.recv()
             sym = d['stream'].split('@')[0].upper()     # retrieves symbol from websocket message
             table = tables[sym]    
@@ -54,6 +55,8 @@ async def start_soc(client, ex_info, e):
             table['a'].append(float(d['data']['a']))     # closest ask
             await signal(sym, client, ex_info)
 
+    await client.close_connection()
+    return
 
 async def signal(sym, client, ex_info):
     if sym_index[sym] == []:
@@ -109,7 +112,7 @@ async def signal(sym, client, ex_info):
         position['qty'] = 0
 
 def calc_indices(e):
-    time.sleep(22) # waits for websockets to initialize and collect data
+    time.sleep(5) # waits for websockets to initialize and collect data
     while True:
         for s in symbols:
             update_index(s)
@@ -137,6 +140,7 @@ def update_index(sym): # generates index and relative index values from table co
         
     sym_index[sym] = mid_prices
 
+
 async def create_order(client, sym, side, price=None, type='MARKET', qty=0.002):
     task = asyncio.create_task(order(client, sym, side, price, type, qty))
 
@@ -150,8 +154,11 @@ async def order(client, sym, side, price, type, qty):
         'price': price,
         'reduce_only': 'False'
     }
-    if trade_params['type'] == 'LIMIT': trade_params['timeInForce'] = 'GTC'
-    if trade_params['type'] == 'MARKET': del trade_params['price']
+    if trade_params['type'] == 'LIMIT': 
+        trade_params['timeInForce'] = 'GTC'
+
+    if trade_params['type'] == 'MARKET':
+        del trade_params['price']
 
     res = await client.futures_create_order(**trade_params)
     return
