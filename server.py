@@ -1,7 +1,7 @@
 import asyncio
 import websockets
 import json
-from _binance import create_client, create_order, close_all, get_exchange_info
+from binance import create_client, create_order, close_all, get_exchange_info
 import math
 import ssl
 from binance import BinanceSocketManager
@@ -38,7 +38,6 @@ async def live_trading(stats, wallet, exinfo, sock, client):
     bm = BinanceSocketManager(client)
     binance_socket = bm.futures_user_socket()
     await binance_socket.__aenter__()
-    #assuming trading is live
     await send(client, sock, 'live')
     auto_trading = False
     while True:
@@ -93,6 +92,7 @@ async def live_trading(stats, wallet, exinfo, sock, client):
         # above receives message from client and takes some action 
         ##################################################################################
         # below gets message from binance servers and parses it then sends to client
+
         userdata = None
         while True:
             #receive response from binance server

@@ -1,7 +1,7 @@
 import asyncio
 import threading
 from binance import BinanceSocketManager, AsyncClient
-import _binance
+import binance
 import os
 import time
 from bisect import bisect_left
@@ -19,7 +19,7 @@ symbols = [
 
 async def main():
     client = await AsyncClient.create(api_key=os.environ.get('apikey'), api_secret=os.environ.get('secretkey'))
-    exinfo = await _binance.get_exchange_info(client)
+    exinfo = await binance.get_exchange_info(client)
     await start(exinfo, None, client)
 
 
@@ -155,7 +155,7 @@ class Data_manager:
 
 
 async def create_order(client, sym, side, price=None, tradetype='MARKET', qty=0.002):
-    task = asyncio.create_task(_binance.order(client, sym, side, price, tradetype, qty))
+    task = asyncio.create_task(binance.order(client, sym, side, price, tradetype, qty))
 
 
 if __name__ == '__main__':
